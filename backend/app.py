@@ -33,7 +33,10 @@ def compute_app_version():
 APP_VERSION = compute_app_version()
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
+
+# CORS: Only allow specific origins (production domain)
+ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', 'https://reminder.heydtmann.eu').split(',')
+CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True)
 
 # Snooze storage: {(medication, time): snooze_until_datetime}
 snooze_cache = {}
@@ -42,6 +45,42 @@ snooze_cache = {}
 otp_cache = {}
 # Session storage: {token: {email, expires}}
 session_cache = {}
+# Rate limiting: {ip: {count, reset_time}}
+rate_limit_cache = {}
+
+# Rate limit settings
+RATE_LIMIT_REQUESTS = 5  # max requests
+RATE_LIMIT_WINDOW = 300  # per 5 minutes
+
+
+def check_rate_limit(ip):
+    """Check if IP is rate limited. Returns True if allowed, False if blocked."""
+    now = datetime.now()
+
+    if ip not in rate_limit_cache:
+        rate_limit_cache[ip] = {'count': 1, 'reset_time': now + timedelta(seconds=RATE_LIMIT_WINDOW)}
+        return True
+
+    entry = rate_limit_cache[ip]
+
+    # Reset if window expired
+    if now > entry['reset_time']:
+        rate_limit_cache[ip] = {'count': 1, 'reset_time': now + timedelta(seconds=RATE_LIMIT_WINDOW)}
+        return True
+
+    # Increment and check
+    entry['count'] += 1
+    if entry['count'] > RATE_LIMIT_REQUESTS:
+        return False
+
+    return True
+
+
+def get_client_ip():
+    """Get client IP, respecting X-Forwarded-For for reverse proxy."""
+    if request.headers.get('X-Forwarded-For'):
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    return request.remote_addr
 
 # SMTP Configuration
 SMTP_HOST = os.environ.get('SMTP_HOST', 'postfix-mailcow')
@@ -67,13 +106,17 @@ if not MAIL_PASSWORD or not FLASK_SECRET_KEY:
         except Exception:
             pass
 
-# Set Flask secret key
-app.secret_key = FLASK_SECRET_KEY or 'dev-secret-key-change-in-prod'
-
 # Auth settings
 OTP_EXPIRY_MINUTES = 5
 SESSION_EXPIRY_DAYS = 30
 AUTH_ENABLED = os.environ.get('AUTH_ENABLED', 'true').lower() == 'true'
+
+# Set Flask secret key - MUST be set in production
+if not FLASK_SECRET_KEY:
+    if AUTH_ENABLED:
+        raise RuntimeError("FLASK_SECRET_KEY must be set when AUTH_ENABLED=true")
+    FLASK_SECRET_KEY = 'dev-only-auth-disabled'
+app.secret_key = FLASK_SECRET_KEY
 
 # Weekday mapping (German and English)
 WEEKDAY_MAP = {
@@ -202,6 +245,26 @@ def get_email_whitelist():
     return config.get('auth', {}).get('allowed_emails', [])
 
 
+def validate_medication_input(medication, scheduled_time):
+    """Validate medication and time input."""
+    import re
+
+    if not medication or not isinstance(medication, str):
+        return False, "Invalid medication name"
+
+    if len(medication) > 100:
+        return False, "Medication name too long"
+
+    if not scheduled_time or not isinstance(scheduled_time, str):
+        return False, "Invalid time"
+
+    # Time must be HH:MM format
+    if not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', scheduled_time):
+        return False, "Invalid time format (use HH:MM)"
+
+    return True, None
+
+
 def is_email_allowed(email):
     """Check if email is in whitelist."""
     whitelist = get_email_whitelist()
@@ -216,8 +279,9 @@ def generate_otp():
 def send_otp_email(to_email, otp):
     """Send OTP via email."""
     if not MAIL_PASSWORD:
-        print(f"[DEBUG] No MAIL_PASSWORD set. OTP for {to_email}: {otp}")
-        return True
+        # No password = can't send email, fail secure
+        print(f"[ERROR] MAIL_PASSWORD not set, cannot send OTP")
+        return False
 
     try:
         subject = "Reminder"
@@ -228,9 +292,12 @@ def send_otp_email(to_email, otp):
         msg["From"] = MAIL_FROM
         msg["To"] = to_email
 
+        # SSL context - verify certificates unless explicitly disabled for internal networks
         context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        if os.environ.get('SMTP_SKIP_VERIFY', 'false').lower() == 'true':
+            # Only for internal/self-signed certs - logs warning
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             server.starttls(context=context)
@@ -393,7 +460,15 @@ def auth_request():
     if not AUTH_ENABLED:
         return jsonify({'error': 'Auth not enabled'}), 400
 
+    # Rate limiting
+    client_ip = get_client_ip()
+    if not check_rate_limit(client_ip):
+        return jsonify({'error': 'Too many requests. Please wait 5 minutes.'}), 429
+
     data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid request'}), 400
+
     email = data.get('email', '').strip().lower()
 
     if not email:
@@ -510,8 +585,9 @@ def snooze_medication():
         medication = data.get('medication')
         scheduled_time = data.get('time')
 
-        if not medication or not scheduled_time:
-            return jsonify({'error': 'medication and time are required'}), 400
+        valid, error = validate_medication_input(medication, scheduled_time)
+        if not valid:
+            return jsonify({'error': error}), 400
 
         # Set snooze for 5 minutes
         snooze_until = datetime.now() + timedelta(minutes=5)
@@ -538,8 +614,9 @@ def confirm_intake():
         medication = data.get('medication')
         scheduled_time = data.get('time')
 
-        if not medication or not scheduled_time:
-            return jsonify({'error': 'medication and time are required'}), 400
+        valid, error = validate_medication_input(medication, scheduled_time)
+        if not valid:
+            return jsonify({'error': error}), 400
 
         # Check if already taken today
         if was_taken_today(medication, scheduled_time):
@@ -604,6 +681,9 @@ def get_history():
     """Get intake history."""
     try:
         days = request.args.get('days', 7, type=int)
+        # Validate days parameter
+        if days < 1 or days > 365:
+            days = 7
         conn = get_db()
 
         cursor = conn.execute('''
@@ -622,13 +702,14 @@ def get_history():
 
 
 # Desktop shortcut download
+APP_HOST = os.environ.get('APP_HOST', 'reminder.heydtmann.eu')
+
+
 @app.route('/api/shortcut.vbs')
 def download_shortcut():
     """Download VBScript to launch status popup in --app mode."""
-    # Get the host from request to make it work on any domain
-    host = request.host
-    scheme = 'https' if request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https' else 'http'
-    url = f"{scheme}://{host}/status.html?popup=1"
+    # Use configured host to prevent Host header injection
+    url = f"https://{APP_HOST}/status.html?popup=1"
 
     vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
 WshShell.Run """" & WshShell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") & "\\Microsoft\\Edge\\Application\\msedge.exe"" --app={url}", 0, False
