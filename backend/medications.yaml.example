@@ -1,0 +1,14 @@
+medications:
+  - name: "Blutdrucktabletten"
+    times: ["08:00", "20:00"]
+    enabled: true
+  - name: "Vitamin D"
+    times: ["12:00"]
+    enabled: true
+  - name: "Schlaftablette"
+    times: ["22:00"]
+    enabled: false
+
+settings:
+  reminder_window: 30
+  timezone: "Europe/Berlin"

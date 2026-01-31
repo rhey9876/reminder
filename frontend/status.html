@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>.</title>
+    <link rel="manifest" href="data:application/json,{}">
+    <link id="favicon" rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABhSURBVFhH7c0xDQAgDATAf/PgwIEDB1jAwQoc4MABDnDQddskLZJ0z3T3W3+Z2dR7d6/33rv33t17v3vv3b33u/fe79577/e99373ve+99373ve/f9973vvfe+957f7T3BjwAfJrJzNz7rwAAAABJRU5ErkJggg==">
+    <link rel="shortcut icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABhSURBVFhH7c0xDQAgDATAf/PgwIEDB1jAwQoc4MABDnDQddskLZJ0z3T3W3+Z2dR7d6/33rv33t17v3vv3b33u/fe79577/e99373ve+99373ve/f9973vvfe+957f7T3BjwAfJrJzNz7rwAAAABJRU5ErkJggg==">
+    <style>
+        * { margin: 0; padding: 0; }
+        html, body { width: 100%; height: 100%; }
+        body {
+            background: #22c55e;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font: bold 12px system-ui;
+            color: white;
+            cursor: pointer;
+            overflow: hidden;
+        }
+        body.due { background: #f97316; }
+        body.overdue { background: #dc2626; animation: flash 0.5s infinite; }
+        @keyframes flash {
+            50% { background: #fff; color: #dc2626; }
+        }
+        #container {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        #info, #confirm {
+            text-align: center;
+            line-height: 1.4;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        body.due #info, body.overdue #info {
+            background: rgba(255,255,255,0.3);
+            font-size: 12px;
+        }
+        body.due #info:hover, body.overdue #info:hover {
+            background: rgba(255,255,255,0.5);
+        }
+        #confirm {
+            display: none;
+            background: rgba(255,255,255,0.5);
+            font-size: 14px;
+        }
+        #confirm:hover {
+            background: rgba(255,255,255,0.8);
+        }
+        body.due #confirm, body.overdue #confirm {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="info"></div>
+        <div id="confirm">✓</div>
+    </div>
+    <script>
+        let currentItem = null;
+        let lastStatus = 'ok';
+        const favicon = document.getElementById('favicon');
+
+        async function notify(title, body) {
+            if (Notification.permission === 'granted') {
+                new Notification(title, { body, icon: favicon.href, tag: 'mrem', requireInteraction: true });
+            } else if (Notification.permission === 'default') {
+                await Notification.requestPermission();
+            }
+        }
+
+        function makeIcon(color) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            ctx.beginPath();
+            ctx.arc(16, 16, 14, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+            return canvas.toDataURL('image/png');
+        }
+        const iconGreen = makeIcon('#22c55e');
+        const iconOrange = makeIcon('#f97316');
+        const iconRed = makeIcon('#dc2626');
+
+        async function check() {
+            try {
+                const r = await fetch('/api/status');
+
+                // Handle auth redirect
+                if (r.status === 401) {
+                    window.location.href = '/login.html';
+                    return;
+                }
+
+                const d = await r.json();
+                const overdue = d.overdue || [];
+                const due = d.due || [];
+
+                document.body.className = '';
+                const info = document.getElementById('info');
+                if (overdue.length) {
+                    document.body.classList.add('overdue');
+                    currentItem = overdue[0];
+                    info.textContent = currentItem.time;
+                    document.title = currentItem.time;
+                    favicon.href = iconRed;
+                    if (lastStatus !== 'overdue') {
+                        notify('⚠️ Überfällig', currentItem.medication + ' - ' + currentItem.time);
+                    }
+                    lastStatus = 'overdue';
+                } else if (due.length) {
+                    document.body.classList.add('due');
+                    currentItem = due[0];
+                    info.textContent = currentItem.time;
+                    document.title = currentItem.time;
+                    favicon.href = iconOrange;
+                    if (lastStatus === 'ok') {
+                        notify('🔔 Fällig', currentItem.medication + ' - ' + currentItem.time);
+                    }
+                    lastStatus = 'due';
+                } else {
+                    lastStatus = 'ok';
+                    currentItem = null;
+                    const upcoming = d.upcoming || [];
+                    if (upcoming.length) {
+                        info.textContent = upcoming[0].time;
+                        document.title = upcoming[0].time;
+                    } else {
+                        info.textContent = '✓';
+                        document.title = ' ';
+                    }
+                    favicon.href = iconGreen;
+                }
+            } catch(e) {}
+        }
+
+        function openApp() {
+            window.open('/', '_blank', 'width=500,height=800');
+        }
+
+        async function doSnooze() {
+            if (currentItem) {
+                await fetch('/api/snooze', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({medication: currentItem.medication, time: currentItem.time})
+                });
+                check();
+            }
+        }
+
+        async function doConfirm() {
+            if (currentItem) {
+                await fetch('/api/confirm', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({medication: currentItem.medication, time: currentItem.time})
+                });
+                check();
+            }
+        }
+
+        document.getElementById('info').addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (document.body.classList.contains('due') || document.body.classList.contains('overdue')) {
+                doSnooze();
+            } else {
+                openApp();
+            }
+        });
+
+        document.getElementById('confirm').addEventListener('click', (e) => {
+            e.stopPropagation();
+            doConfirm();
+        });
+
+        document.body.addEventListener('click', openApp);
+        favicon.href = iconGreen;
+        check();
+        setInterval(check, 30000);
+    </script>
+</body>
+</html>
