@@ -76,13 +76,17 @@ Minimal desktop indicator designed for Chromium/Edge --app mode:
 - Dynamic favicon changes color with status
 - Sends notifications on status change
 
+Click actions (orange/red state):
+- Click on **time** = Snooze (5 min)
+- Click on **✓** = Confirm intake
+
 Desktop shortcuts:
 ```bash
 # Linux
-chromium --app="https://mrem.heydtmann.eu/status.html?popup=1" --window-size=50,50
+chromium --app="https://reminder.heydtmann.eu/status.html?popup=1" --window-size=50,50
 
 # Windows (Edge)
-msedge --app=https://mrem.heydtmann.eu/status.html?popup=1
+msedge --app=https://reminder.heydtmann.eu/status.html?popup=1
 ```
 
 ### API Endpoints
@@ -133,6 +137,26 @@ auth:
   allowed_emails:
     - "user@example.com"
 ```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_ENABLED` | `true` | Enable email OTP authentication |
+| `ALLOWED_ORIGINS` | `https://reminder.heydtmann.eu` | CORS allowed origins (comma-separated) |
+| `APP_HOST` | `reminder.heydtmann.eu` | Host for generated shortcuts |
+| `SMTP_HOST` | `postfix-mailcow` | SMTP server hostname |
+| `SMTP_PORT` | `587` | SMTP server port |
+| `SMTP_SKIP_VERIFY` | `false` | Skip SSL cert verification (for self-signed) |
+| `MAIL_FROM` | `noreply@heydtmann.eu` | Email sender address |
+| `MAIL_USER` | `noreply@heydtmann.eu` | SMTP username |
+
+## Security
+
+- **Rate Limiting**: `/api/auth/request` limited to 5 requests per 5 minutes per IP
+- **Input Validation**: Medication names max 100 chars, time format HH:MM enforced
+- **Session Cookies**: httponly, secure, samesite=Strict
+- **OTP**: 6-digit, 5-minute expiry, max 3 attempts
 
 ## Networks
 

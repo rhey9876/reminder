@@ -2,7 +2,7 @@
  * Reminder PWA - Service Worker
  */
 
-const CACHE_NAME = 'reminder-v6';
+const CACHE_NAME = 'reminder-v7';
 const VERSION_CACHE_KEY = 'app-version';
 const STATIC_ASSETS = [
     '/',
@@ -142,6 +142,16 @@ self.addEventListener('fetch', (event) => {
  */
 async function checkStatus() {
     try {
+        // Check authentication first
+        const authResponse = await fetch('/api/auth/check');
+        if (!authResponse.ok) return;
+
+        const authData = await authResponse.json();
+        if (authData.auth_enabled && !authData.authenticated) {
+            // Not authenticated, skip status check
+            return;
+        }
+
         // Check for version changes
         await checkVersionAndUpdate();
 

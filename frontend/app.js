@@ -44,7 +44,9 @@ async function checkAuth() {
         return true;
     } catch (error) {
         console.error('Auth check failed:', error);
-        return true; // On error, try to proceed
+        showError('Verbindung zum Server fehlgeschlagen. Bitte neu laden.');
+        hideLoading();
+        return false; // Don't proceed on error
     }
 }
 
@@ -158,6 +160,7 @@ async function fetchStatus() {
         checkAndNotify(data);
     } catch (error) {
         console.error('Error fetching status:', error);
+        hideLoading();
         showError('Verbindungsfehler. Versuche erneut...');
     }
 }
@@ -417,6 +420,13 @@ function showError(message) {
  */
 function hideError() {
     document.getElementById('errorBanner').classList.add('hidden');
+}
+
+/**
+ * Hide loading spinner
+ */
+function hideLoading() {
+    document.getElementById('loading').classList.add('hidden');
 }
 
 /**
