@@ -7,6 +7,12 @@ import secrets
 import smtplib
 import sqlite3
 import hashlib
+import ipaddress
+import logging
+import json
+import threading
+import time
+import urllib.request
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,10 +21,19 @@ from flask_cors import CORS
 import yaml
 
 
+class _NoSuccessFilter(logging.Filter):
+    def filter(self, record):
+        # Suppress Werkzeug access log lines for 200 responses
+        return '" 200 ' not in record.getMessage()
+
+
+logging.getLogger('werkzeug').addFilter(_NoSuccessFilter())
+
+
 def compute_app_version():
     """Compute version hash from source files for automatic cache invalidation."""
     files_to_hash = [
-        Path(__file__),  # app.py
+        Path(__file__),  # reminder.py
         Path(__file__).parent.parent / 'frontend' / 'app.js',
         Path(__file__).parent.parent / 'frontend' / 'index.html',
         Path(__file__).parent.parent / 'frontend' / 'service-worker.js',
@@ -81,6 +96,25 @@ def get_client_ip():
     if request.headers.get('X-Forwarded-For'):
         return request.headers.get('X-Forwarded-For').split(',')[0].strip()
     return request.remote_addr
+
+
+# Trusted networks that bypass authentication (home LAN, company LAN, loopback)
+_TRUSTED_NETWORKS = [
+    ipaddress.ip_network('127.0.0.0/8'),     # loopback
+    ipaddress.ip_network('192.168.0.0/16'),  # home LAN
+    ipaddress.ip_network('172.16.0.0/12'),   # RFC-1918
+    ipaddress.ip_network('10.0.0.0/8'),      # company LAN / VPN
+]
+
+
+def is_trusted_ip(ip_str):
+    """Return True if IP is on a trusted local network (auth bypassed)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return any(ip in net for net in _TRUSTED_NETWORKS)
+    except ValueError:
+        return False
+
 
 # SMTP Configuration
 SMTP_HOST = os.environ.get('SMTP_HOST', 'postfix-mailcow')
@@ -355,6 +389,10 @@ def require_auth(f):
         if not AUTH_ENABLED:
             return f(*args, **kwargs)
 
+        # Trusted local networks (home LAN, company LAN) bypass auth
+        if is_trusted_ip(get_client_ip()):
+            return f(*args, **kwargs)
+
         token = get_auth_token()
         email = validate_session(token)
 
@@ -443,6 +481,10 @@ def auth_check():
     """Check if user is authenticated."""
     if not AUTH_ENABLED:
         return jsonify({'authenticated': True, 'auth_enabled': False})
+
+    # Trusted local networks (home LAN, company LAN) are always authenticated
+    if is_trusted_ip(get_client_ip()):
+        return jsonify({'authenticated': True, 'auth_enabled': True, 'trusted_network': True})
 
     token = get_auth_token()
     email = validate_session(token)
@@ -740,8 +782,88 @@ def serve_static(filename):
     return response
 
 
+# ---------------------------------------------------------------------------
+# No-Food-Fenster -> Home Assistant (Treppenspot rot)
+# Pro Medikament optional:  no_food: {before: 60, after: 30}  (Minuten um die Einnahmezeit)
+# Webhook: settings.ha_webhook_url  (POST {"action": "red-plus" | "red-minus" | "red-flash"})
+# ---------------------------------------------------------------------------
+NOFOOD_TICK_SECONDS = 20
+nofood_log = logging.getLogger('nofood')
+
+
+def nofood_windows(config, now):
+    """Liste (start, ende, geplante_zeit, name) der heutigen No-Food-Fenster."""
+    today_str = now.strftime('%Y-%m-%d')
+    result = []
+    for med in config.get('medications', []):
+        nf = med.get('no_food')
+        if not nf or not med.get('enabled', True) or not is_scheduled_today(med.get('days')):
+            continue
+        before = int(nf.get('before', 0))
+        after = int(nf.get('after', 0))
+        for time_str in med.get('times', []):
+            sched = datetime.strptime(f"{today_str} {time_str}", '%Y-%m-%d %H:%M')
+            result.append((sched - timedelta(minutes=before), sched + timedelta(minutes=after), sched, med['name']))
+    return result
+
+
+def nofood_state(config, now):
+    """(in_window, flash_key) - flash_key gesetzt, wenn jetzt (auf die Minute) Einnahmezeit ist."""
+    in_window = False
+    flash_key = None
+    for start, end, sched, name in nofood_windows(config, now):
+        if start <= now < end:
+            in_window = True
+        if now.replace(second=0, microsecond=0) == sched:
+            flash_key = f"{now.strftime('%Y-%m-%d')} {name} {sched.strftime('%H:%M')}"
+    return in_window, flash_key
+
+
+def ha_send(url, action):
+    """POST an HA-Webhook. True bei Erfolg."""
+    req = urllib.request.Request(
+        url, data=json.dumps({'action': action}).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            ok = 200 <= resp.status < 300
+    except Exception as e:  # Netz/HA weg: beim naechsten Tick erneut
+        nofood_log.warning('HA webhook %s failed: %s', action, e)
+        return False
+    nofood_log.info('HA webhook %s -> ok=%s', action, ok)
+    return ok
+
+
+def nofood_loop():
+    """Hintergrund-Thread: meldet Fenster-Wechsel und Einnahmezeitpunkt an HA."""
+    last_sent = None      # zuletzt erfolgreich gemeldeter Zustand (True/False)
+    flashed = set()
+    while True:
+        try:
+            config = load_config()
+            url = config.get('settings', {}).get('ha_webhook_url')
+            if url:
+                now = datetime.now()
+                in_window, flash_key = nofood_state(config, now)
+                if last_sent is None and not in_window:
+                    last_sent = False   # Start ausserhalb des Fensters: nichts senden
+                elif in_window != last_sent:
+                    if ha_send(url, 'red-plus' if in_window else 'red-minus'):
+                        last_sent = in_window
+                if flash_key and flash_key not in flashed:
+                    flashed.add(flash_key)
+                    if in_window:
+                        ha_send(url, 'red-flash')
+                if len(flashed) > 50:
+                    flashed.clear()
+        except Exception:
+            nofood_log.exception('nofood loop error')
+        time.sleep(NOFOOD_TICK_SECONDS)
+
+
 if __name__ == '__main__':
     init_db()
+    threading.Thread(target=nofood_loop, daemon=True, name='nofood').start()
     print(f"Database path: {DB_PATH}")
     print(f"Config path: {CONFIG_PATH}")
     print(f"Frontend directory: {FRONTEND_DIR}")
