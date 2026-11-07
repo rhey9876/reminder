@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Reminder PWA - A Progressive Web App for medication intake reminders with email-based authentication. German language UI.
+Reminder PWA - Progressive Web App for medication intake reminders with email OTP authentication. German language UI, designed for personal use.
+
+**Key characteristics:**
+- Single-file Flask backend serving both API and static files
+- Vanilla JS frontend (no build step)
+- SQLite for persistence, YAML for config
+- Email OTP auth with 30-day sessions; trusted local networks bypass auth entirely
+- Designed for Docker Swarm deployment with bind-mounted code
 
 ## Commands
 
@@ -12,154 +19,230 @@ Reminder PWA - A Progressive Web App for medication intake reminders with email-
 ```bash
 cd backend
 pip install -r requirements.txt
-DATA_DIR=./data AUTH_ENABLED=false python app.py
-# App runs at http://localhost:5001, serves frontend automatically
+DATA_DIR=./data AUTH_ENABLED=false python reminder.py
+# Backend at http://localhost:5001, serves frontend automatically
 ```
 
-### Docker Deployment
+### Docker Deployment (Production)
 ```bash
-# Build and push image
+# Build and push image (required when reminder.py or Dockerfile changes)
 docker build -t registry.heydtmann.eu:5000/reminder:latest ./backend
 docker push registry.heydtmann.eu:5000/reminder:latest
 
-# Deploy to swarm
+# Deploy stack (initial deployment or after stack file changes)
 docker stack deploy -c /data/TheShare/prod-mgmt/reminder.stack reminder
 
-# Restart service after code changes (code is bind-mounted)
+# Restart service (frontend/config changes only — code is bind-mounted)
 docker service update reminder_reminder --force
 
-# View logs
-docker service logs reminder_reminder --tail 50
+# Check status and logs
+docker service ps reminder_reminder
+docker service logs reminder_reminder --tail 50 --follow
 ```
 
-### Test API
+### Test API Endpoints
 ```bash
-docker exec $(docker ps -q -f name=reminder_reminder) python3 -c "
-import urllib.request
-print(urllib.request.urlopen('http://localhost:5001/api/auth/check').read().decode())
-"
+# Check auth status (trusted_network: true when called from LAN)
+curl https://reminder.heydtmann.eu/api/auth/check
+
+# Test status endpoint (requires auth or trusted network)
+curl https://reminder.heydtmann.eu/api/status
+
+# From inside container
+docker exec $(docker ps -q -f name=reminder_reminder) \
+  python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5001/api/auth/check').read().decode())"
 ```
 
 ## Architecture
 
-### Backend (`backend/app.py`)
-Single Flask application serving both API and static frontend files.
+### Core Design Pattern
+**Single responsibility per file:**
+- `backend/reminder.py` - Complete backend (API + file serving)
+- `frontend/app.js` - Main app logic
+- `frontend/service-worker.js` - Offline caching + background checks
+- `frontend/login.html` - Standalone OTP login flow
+- `frontend/status.html` - Minimal desktop status indicator
 
-- **Data storage**: SQLite database at `DATA_DIR/intake_log.db`
-- **Config**: YAML file at `DATA_DIR/reminder.yaml` (re-read on each request)
-- **Snooze**: In-memory cache `snooze_cache` - lost on restart (intentional, only 5min snoozes)
-- **Auth**: Email OTP authentication with in-memory session cache (30 day sessions)
-- **Secrets**: Reads `PROD.MAIL_PASSWORD` and `PROD.FLASK_SECRET_KEY` from `/run/secrets/noreply`
-- **Version**: Auto-computed MD5 hash from source files for cache invalidation
+### Backend (`backend/reminder.py`)
+Flask app serving both API endpoints and static frontend files. No database migrations, no ORM.
 
-Key functions:
-- `get_medication_status()`: Core logic - calculates overdue/due/upcoming based on current time, scheduled times, taken status, and snooze status
-- `is_scheduled_today()`: Weekday filtering (supports German/English day names)
-- `require_auth`: Decorator to protect API endpoints
+**State management:**
+- **Persistent**: SQLite (`intake_log.db`), YAML config (`reminder.yaml`)
+- **In-memory**: OTP cache, session cache (30-day tokens), snooze cache (5min), rate limits
+- **Config re-read**: Every request reads fresh YAML (intentional for easy editing)
 
-### Frontend (`frontend/`)
-Vanilla JavaScript PWA, no build step required.
+**Critical functions:**
+- `get_medication_status()` - Core business logic: calculates overdue/due/upcoming by comparing current time against scheduled times, checking taken status, and respecting snooze
+- `is_scheduled_today()` - Weekday filtering supporting German/English day names
+- `is_trusted_ip()` - Returns True for 127.x, 192.168.x, 172.16.x, 10.x — these bypass auth
+- `require_auth` - Decorator: skips auth if `AUTH_ENABLED=false` OR client IP is trusted, otherwise validates session cookie/Bearer token
+- `checkAuth()` in frontend - MUST complete before app initialization; retries up to 5× for VPN/DNS delays
 
-- `app.js`: Main application logic, renders medication cards, handles confirm/snooze
-- `service-worker.js`: Caching, background status checks, version-based cache invalidation
-- `index.html`: Main app page with embedded CSS
-- `login.html`: Email OTP login page
-- `status.html`: Minimal status popup for desktop use
+**Auth flow (internet access):**
+1. User requests OTP → rate-limited, sends email
+2. User submits OTP → validates, creates session token
+3. Server sets httponly cookie with 30-day expiry
+4. All protected endpoints check cookie via `@require_auth`
 
-### Status Popup (`frontend/status.html`)
-Minimal desktop indicator designed for Chromium/Edge --app mode:
-- **Green**: All OK, shows next scheduled time
-- **Orange**: Due (within reminder_window)
-- **Red flashing**: Overdue (past reminder_window)
-- Click on time (orange/red) = ACK (snooze 5min)
-- Click elsewhere = open main app
-- Dynamic favicon changes color with status
-- Sends notifications on status change
+**Auth flow (local network — home LAN or company LAN):**
+- Client IP is checked against trusted ranges on every request
+- Trusted IPs bypass OTP/cookie entirely — `auth_check` returns `{authenticated: true, trusted_network: true}`
+- No session token needed, no login page shown
 
-Click actions (orange/red state):
-- Click on **time** = Snooze (5 min)
-- Click on **✓** = Confirm intake
+### Frontend Architecture
 
-Desktop shortcuts:
-```bash
-# Linux
-chromium --app="https://reminder.heydtmann.eu/status.html?popup=1" --window-size=50,50
+**Three separate HTML pages (no SPA router):**
 
-# Windows (Edge)
-msedge --app=https://reminder.heydtmann.eu/status.html?popup=1
-```
+1. **`index.html` + `app.js`** - Main medication management
+   - Checks auth on load, redirects to login if needed
+   - All API calls go through `apiFetch()` (see VPN section below)
+   - Fetches `/api/status` every 60s
+   - Renders medication cards in 3 sections: overdue/due/upcoming
+   - Confirm = POST to `/api/confirm` → logs intake
+   - Snooze = POST to `/api/snooze` → 5min delay
+   - Shows version hash (`/api/version`) in footer after load
 
-### API Endpoints
+2. **`login.html`** - Email OTP flow
+   - Step 1: Email input → POST `/api/auth/request`
+   - Step 2: 6-digit code → POST `/api/auth/verify` → sets cookie → redirect to `/`
+   - Already authenticated users auto-redirect to main app
 
-**Auth (no authentication required):**
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/auth/check` | Check if authenticated |
-| POST | `/api/auth/request` | Request OTP for email |
-| POST | `/api/auth/verify` | Verify OTP, create session |
-| POST | `/api/auth/logout` | Logout, invalidate session |
+3. **`status.html`** - Minimal always-on-top indicator
+   - Designed for `--app` mode (borderless window)
+   - Color indicates status: green (ok), orange (due), red flashing (overdue)
+   - Click on time = snooze, click ✓ = confirm
+   - Dynamic favicon changes with status
+   - Sends desktop notifications on status change
+   - Silently retries every 30s on error (intentional — handles transient VPN DNS failures)
 
-**Protected (require authentication):**
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/status` | Current medication status (overdue/due/upcoming) |
-| POST | `/api/confirm` | Confirm medication intake |
-| POST | `/api/snooze` | Snooze medication for 5 minutes |
-| GET | `/api/version` | App version hash for cache invalidation |
-| GET | `/api/config` | Get medications config |
-| POST | `/api/config` | Update medications config |
-| GET | `/api/history` | Intake history |
+**Service Worker (`service-worker.js`):**
+- Caches static assets for offline use (allows page to load even when DNS is failing)
+- **Version-based invalidation**: Checks `/api/version` (MD5 hash of source files), clears cache on change
+- Background status checks every 5 minutes (only if authenticated)
+- Must check auth BEFORE fetching `/api/status` to avoid 401 errors
+- Cache name: `reminder-v8` — increment this to force immediate cache refresh on all clients
 
-## File Locations (Production)
+### VPN / DNS Handling
 
-- Stack file: `/data/TheShare/prod-mgmt/reminder.stack`
-- Data volume: `/data/dockervolumes/reminder/`
-  - `reminder.yaml` - medication and auth configuration
-  - `intake_log.db` - SQLite database
-- Source code: `/home/rdpuser/projects/reminder/` (bind-mounted)
-- Docker secret: `noreply` (contains PROD.MAIL_PASSWORD, PROD.FLASK_SECRET_KEY)
+Corporate VPNs often route DNS through the tunnel where external domains are blocked. The app handles this at two levels:
 
-## Config Format (`reminder.yaml`)
+**Backend — trusted network bypass:**
+- Requests from `10.0.0.0/8` (company LAN / VPN tunnel IPs) bypass authentication entirely
+- Same for `192.168.0.0/16` (home LAN), `172.16.0.0/12`, `127.0.0.0/8`
+- Implemented in `is_trusted_ip()` + `require_auth` decorator + `auth_check` endpoint
+
+**Frontend — connection retry:**
+- All API calls use `apiFetch()` instead of `fetch()` directly
+- `checkAuth()` retries up to 5 times with 4-second gaps; shows progress in the loading spinner text: *"Verbindung wird hergestellt… (2/5)"*
+- On persistent network error, `apiFetch()` attempts Quad9 DNS-over-HTTPS (`dns.quad9.net`) to resolve the hostname, then retries using the resolved IP (works if VPN blocks DNS but allows HTTPS; may fail if TLS cert doesn't cover the IP)
+- If all attempts fail, error banner shows the resolved IP and suggests enabling browser DoH
+
+**Recommended fix for company VPN (no admin rights needed):**
+- Chrome/Edge: Settings → Privacy → Security → "Use secure DNS" → Custom → `https://dns.quad9.net/dns-query`
+- Firefox: Settings → Network Settings → Enable DNS over HTTPS → Quad9
+- Once browser uses DoH, DNS is resolved over HTTPS (port 443) bypassing VPN DNS blocking, and the app connects normally
+
+### API Design
+
+**Auth endpoints (no auth required):**
+- `GET /api/auth/check` - Returns `{authenticated, auth_enabled, email?, trusted_network?}`
+- `POST /api/auth/request` - Sends OTP email (rate-limited: 5 req/5min per IP)
+- `POST /api/auth/verify` - Validates OTP, creates session, sets cookie
+- `POST /api/auth/logout` - Deletes session, clears cookie
+
+**Protected endpoints (require auth cookie OR trusted network IP):**
+- `GET /api/status` - Main endpoint: `{overdue: [], due: [], upcoming: []}`
+- `POST /api/confirm {medication, time}` - Logs intake to DB
+- `POST /api/snooze {medication, time}` - Sets 5min snooze in memory
+- `GET /api/version` - MD5 hash of source files for cache invalidation
+- `GET /api/config` - Returns full YAML config
+- `POST /api/config` - Updates YAML config
+- `GET /api/history?days=7` - Returns intake log
+
+### Deployment Architecture (Production)
+
+**Docker Swarm setup:**
+- Service name: `reminder_reminder` (from stack name + service name)
+- Node constraint: `pi6` (Raspberry Pi 6)
+- Networks: `test-o` (reverse proxy), `ynet-o` (mail server)
+- Bind mounts: Code is mounted read-only for hot-reload without rebuild
+- Secret: `/run/secrets/noreply` contains `PROD.MAIL_PASSWORD` and `PROD.FLASK_SECRET_KEY`
+
+**When to rebuild the image vs. just restart:**
+- `reminder.py` changed → rebuild + push + `stack deploy`
+- `Dockerfile` or `requirements.txt` changed → rebuild + push + `stack deploy`
+- Frontend files (`*.html`, `*.js`) changed → `service update --force` only (bind-mounted)
+- Stack file (`reminder.stack`) changed → `stack deploy` only
+
+**Data persistence:**
+- Volume: `/data/dockervolumes/reminder/`
+  - `reminder.yaml` - medication schedules + auth whitelist
+  - `intake_log.db` - SQLite database with intake history
+
+**Stack file location:** `/data/TheShare/prod-mgmt/reminder.stack`
+
+### Configuration (`reminder.yaml`)
 
 ```yaml
 medications:
-  - name: "Short Name"      # Displayed in app
-    full: "Full description" # Optional
-    times: ["08:00", "20:00"]
-    days: ["Mo", "Mi", "Fr"]  # Optional, omit for daily
-    enabled: true
+  - name: "Med Name"        # Required, shown in UI
+    full: "Full Name"       # Optional, for detailed view
+    times: ["08:00", "20:00"]  # Required, HH:MM format
+    days: ["Mo", "Mi", "Fr"]   # Optional, omit for daily
+    enabled: true           # Optional, default true
 
 settings:
-  reminder_window: 15  # Minutes before/after scheduled time
+  reminder_window: 15  # Minutes before/after = "due" state
   timezone: "Europe/Berlin"
 
 auth:
   allowed_emails:
-    - "user@example.com"
+    - "user@example.com"  # Whitelist for OTP login (internet access only)
 ```
+
+**Weekday names:** Supports German (Mo, Di, Mi, Do, Fr, Sa, So) and English (Mon, Tue, Wed, Thu, Fri, Sat, Sun), case-insensitive.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUTH_ENABLED` | `true` | Enable email OTP authentication |
-| `ALLOWED_ORIGINS` | `https://reminder.heydtmann.eu` | CORS allowed origins (comma-separated) |
-| `APP_HOST` | `reminder.heydtmann.eu` | Host for generated shortcuts |
-| `SMTP_HOST` | `postfix-mailcow` | SMTP server hostname |
-| `SMTP_PORT` | `587` | SMTP server port |
-| `SMTP_SKIP_VERIFY` | `false` | Skip SSL cert verification (for self-signed) |
-| `MAIL_FROM` | `noreply@heydtmann.eu` | Email sender address |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AUTH_ENABLED` | `true` | Toggle authentication (set `false` for local dev) |
+| `ALLOWED_ORIGINS` | `https://reminder.heydtmann.eu` | CORS origins (comma-separated) |
+| `APP_HOST` | `reminder.heydtmann.eu` | Host for generated .vbs shortcut |
+| `DATA_DIR` | `/data` | Path for SQLite DB and YAML config |
+| `SMTP_HOST` | `postfix-mailcow` | SMTP server for OTP emails |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_SKIP_VERIFY` | `false` | Skip SSL verification (self-signed certs) |
+| `MAIL_FROM` | `noreply@heydtmann.eu` | Sender address |
 | `MAIL_USER` | `noreply@heydtmann.eu` | SMTP username |
+| `MAIL_PASSWORD` | from secret | SMTP password (set via secret or env) |
+| `FLASK_SECRET_KEY` | from secret | Session signing key (required in production) |
 
-## Security
+## Security Features
 
-- **Rate Limiting**: `/api/auth/request` limited to 5 requests per 5 minutes per IP
-- **Input Validation**: Medication names max 100 chars, time format HH:MM enforced
-- **Session Cookies**: httponly, secure, samesite=Strict
-- **OTP**: 6-digit, 5-minute expiry, max 3 attempts
+- **Rate limiting**: 5 OTP requests per 5 minutes per IP (in-memory)
+- **Input validation**: Medication names ≤100 chars, time format HH:MM enforced
+- **Session cookies**: httponly, secure, samesite=Strict, 30-day expiry
+- **OTP**: 6 digits, 5-minute expiry, max 3 attempts before invalidation
+- **CORS**: Restricted to configured origins
+- **Auth whitelist**: Only emails in config can request OTP
+- **Trusted networks**: 10.x, 192.168.x, 172.16.x, 127.x bypass auth — these are considered physically secure
 
-## Networks
+## Common Issues
 
-Service requires two overlay networks:
-- `test-o`: Main application network (reverse proxy access)
-- `ynet-o`: Mail server access (postfix-mailcow)
+**Retry loop on startup ("Verbindung wird hergestellt… 1/5"):**
+- Cause: DNS resolution failing, typically corporate VPN routing DNS through tunnel
+- Fix: Enable browser DNS-over-HTTPS pointing to Quad9 (no admin rights needed)
+  - Chrome/Edge: Settings → Privacy → Security → Secure DNS → `https://dns.quad9.net/dns-query`
+  - Firefox: Settings → Network Settings → DNS over HTTPS → Quad9
+- The app retries 5× with 4s gaps before showing a hard error
+
+**Login page appears despite being on home/company LAN:**
+- Cause: Request not reaching server with correct client IP (reverse proxy config)
+- Check: `curl https://reminder.heydtmann.eu/api/auth/check` — should show `trusted_network: true`
+- Fix: Ensure `X-Forwarded-For` header is passed by reverse proxy (Traefik does this by default)
+
+**Service Worker not updating / old version shown:**
+- Increment `CACHE_NAME` in `service-worker.js` (currently `reminder-v8`)
+- Hard refresh browser (`Ctrl+Shift+R`)
+- Or: Unregister in DevTools → Application → Service Workers

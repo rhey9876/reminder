@@ -5,7 +5,16 @@
       "Bash(docker service:*)",
       "Bash(curl:*)",
       "Bash(python3:*)",
-      "Bash(docker stack deploy:*)"
+      "Bash(docker stack deploy:*)",
+      "Bash(docker build:*)",
+      "Bash(docker push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git mv:*)",
+      "Bash(cp /data/TheShare/prod-mgmt/reminder.stack /tmp/reminder.stack)",
+      "Bash(sed 's|/app\\\\.py:/app/app\\\\.py|/reminder.py:/app/reminder.py|g' /tmp/reminder.stack)",
+      "Bash(sudo cp:*)"
     ]
   }
 }

@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
-COPY app.py .
+COPY reminder.py .
 
 # Create data directory
 RUN mkdir -p /data
@@ -20,4 +20,4 @@ ENV PYTHONUNBUFFERED=1
 ENV DATA_DIR=/data
 
 # Run application
-CMD ["python", "app.py"]
+CMD ["python", "reminder.py"]

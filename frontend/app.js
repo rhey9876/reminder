@@ -2,11 +2,71 @@
  * Reminder PWA - Frontend Application
  */
 
-const API_BASE = '';
 const REFRESH_INTERVAL = 60000; // 60 seconds
 
 let refreshTimer = null;
 let lastNotifiedKey = '';  // Track last notification to avoid spam
+
+// --- VPN / DNS fallback ---
+// When corporate VPN blocks DNS for the app's domain, we resolve via Quad9
+// DNS-over-HTTPS and cache the IP so API calls keep working.
+let _apiBase = '';  // '' = use relative URLs (normal); 'https://IP' = VPN fallback
+
+async function _resolveViaQuad9(hostname) {
+    try {
+        const res = await fetch(
+            `https://dns.quad9.net/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+            { headers: { 'Accept': 'application/dns-json' }, signal: AbortSignal.timeout(4000) }
+        );
+        if (!res.ok) return null;
+        const data = await res.json();
+        const record = (data.Answer || []).find(r => r.type === 1);
+        return record ? record.data : null;
+    } catch {
+        return null;
+    }
+}
+
+async function apiFetch(path, options) {
+    const url = _apiBase + path;
+    try {
+        return await fetch(url, options);
+    } catch (err) {
+        // Only attempt fallback when on a named host (not localhost / raw IP)
+        const hostname = window.location.hostname;
+        if (hostname === 'localhost' || /^\d/.test(hostname)) throw err;
+
+        // DNS may be blocked by VPN — try Quad9 DoH to resolve the IP
+        const cached = sessionStorage.getItem('reminder_api_ip');
+        const ip = cached || await _resolveViaQuad9(hostname);
+        if (!ip) throw err;
+
+        const port = window.location.port ? `:${window.location.port}` : '';
+        const base = `${window.location.protocol}//${ip}${port}`;
+        try {
+            const response = await fetch(base + path, options);
+            // IP connection worked — remember for this session
+            _apiBase = base;
+            sessionStorage.setItem('reminder_api_ip', ip);
+            return response;
+        } catch {
+            // HTTPS to IP likely fails (cert is for domain, not IP).
+            // Show a helpful message with the resolved IP.
+            _showVpnHint(ip, hostname);
+            throw err;
+        }
+    }
+}
+
+function _showVpnHint(ip, hostname) {
+    console.warn(
+        `DNS-Auflösung fehlgeschlagen (VPN?). Aufgelöste IP: ${ip}\n` +
+        `Lösung: Browser-eigenes DNS-over-HTTPS aktivieren (kein Admin nötig):\n` +
+        `  Chrome/Edge: Einstellungen → Datenschutz → Sicherheit → "Sicheres DNS" → Benutzerdefiniert → https://dns.quad9.net/dns-query\n` +
+        `  Firefox: Einstellungen → Allgemein → Netzwerkeinstellungen → DNS über HTTPS → Quad9`
+    );
+    showError(`VPN blockiert DNS. Lösung: Browser-DoH auf dns.quad9.net setzen (Details in Konsole, kein Admin nötig).`);
+}
 
 /**
  * Initialize the application
@@ -22,32 +82,42 @@ async function init() {
     await fetchStatus();
     startAutoRefresh();
     registerServiceWorker();
+    showAppVersion();
 }
 
 /**
- * Check if user is authenticated
+ * Check if user is authenticated, with retries for VPN/DNS delays.
  */
 async function checkAuth() {
-    try {
-        const response = await fetch('/api/auth/check');
-        const data = await response.json();
+    const MAX_ATTEMPTS = 5;
+    const RETRY_DELAY_MS = 4000;
 
-        if (!data.auth_enabled) {
-            return true; // Auth disabled, proceed
-        }
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+            const response = await apiFetch('/api/auth/check');
+            const data = await response.json();
 
-        if (!data.authenticated) {
+            hideError();
+            setLoadingText('Laden...');
+
+            if (!data.auth_enabled || data.authenticated) {
+                return true;
+            }
+
             window.location.href = '/login.html';
             return false;
+        } catch (error) {
+            console.warn(`Auth check attempt ${attempt}/${MAX_ATTEMPTS} failed:`, error);
+            if (attempt < MAX_ATTEMPTS) {
+                setLoadingText(`Verbindung wird hergestellt… (${attempt}/${MAX_ATTEMPTS})`);
+                await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+            }
         }
-
-        return true;
-    } catch (error) {
-        console.error('Auth check failed:', error);
-        showError('Verbindung zum Server fehlgeschlagen. Bitte neu laden.');
-        hideLoading();
-        return false; // Don't proceed on error
     }
+
+    showError('Verbindung zum Server fehlgeschlagen. Bitte neu laden.');
+    hideLoading();
+    return false;
 }
 
 /**
@@ -141,7 +211,7 @@ async function updateBadge(count) {
  */
 async function fetchStatus() {
     try {
-        const response = await fetch(`${API_BASE}/api/status`);
+        const response = await apiFetch('/api/status');
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -204,7 +274,7 @@ async function confirmIntake(medication, time, buttonElement) {
     buttonElement.textContent = '...';
 
     try {
-        const response = await fetch(`${API_BASE}/api/confirm`, {
+        const response = await apiFetch('/api/confirm', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -244,7 +314,7 @@ async function snoozeIntake(medication, time, buttonElement) {
     buttonElement.textContent = '...';
 
     try {
-        const response = await fetch(`${API_BASE}/api/snooze`, {
+        const response = await apiFetch('/api/snooze', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -427,6 +497,26 @@ function hideError() {
  */
 function hideLoading() {
     document.getElementById('loading').classList.add('hidden');
+}
+
+/**
+ * Update loading spinner text
+ */
+function setLoadingText(text) {
+    const el = document.getElementById('loadingText');
+    if (el) el.textContent = text;
+}
+
+/**
+ * Fetch and display app version
+ */
+async function showAppVersion() {
+    try {
+        const res = await apiFetch('/api/version');
+        const data = await res.json();
+        const el = document.getElementById('appVersion');
+        if (el) el.textContent = `v${data.version}`;
+    } catch { /* non-critical */ }
 }
 
 /**

@@ -18,7 +18,7 @@ medication-reminder/
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── app.py
+│   ├── reminder.py
 │   └── medications.yaml.example
 ├── frontend/
 │   ├── index.html
@@ -148,7 +148,7 @@ ports:
 # Backend starten
 cd backend
 pip install -r requirements.txt
-DATA_DIR=./data python app.py
+DATA_DIR=./data python reminder.py
 
 # Frontend wird automatisch unter http://localhost:5000 ausgeliefert
 ```

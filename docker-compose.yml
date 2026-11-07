@@ -12,7 +12,7 @@ services:
       - DEBUG=false
     volumes:
       - /data/dockervolumes/mrem:/data
-      - /home/rdpuser/projects/medication-reminder/backend/app.py:/app/app.py:ro
+      - /home/rdpuser/projects/medication-reminder/backend/reminder.py:/app/reminder.py:ro
       - /home/rdpuser/projects/medication-reminder/frontend:/app/../frontend:ro
     networks:
       - test-o

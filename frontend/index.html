@@ -274,6 +274,56 @@
             color: white;
         }
 
+        #appHelpDialog {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        #appHelpDialog.open {
+            display: flex;
+        }
+        #appHelpDialog .dialog-box {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 480px;
+            width: 90%;
+            color: #333;
+        }
+        #appHelpDialog h3 {
+            margin-bottom: 12px;
+            font-size: 1rem;
+        }
+        #appHelpDialog ol {
+            padding-left: 20px;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        #appHelpDialog code {
+            display: block;
+            background: #f3f4f6;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 0.75rem;
+            margin: 8px 0;
+            word-break: break-all;
+        }
+        #appHelpDialog .close-btn {
+            margin-top: 16px;
+            width: 100%;
+            padding: 10px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
         .error-banner {
             background: #fee2e2;
             color: #dc2626;
@@ -334,7 +384,7 @@
 
         <div id="loading" class="loading">
             <div class="spinner"></div>
-            <p>Laden...</p>
+            <p id="loadingText">Laden...</p>
         </div>
 
         <div id="content" class="hidden">
@@ -373,7 +423,22 @@
         </div>
 
         <p id="lastUpdate" class="last-update"></p>
+        <p id="appVersion" class="last-update"></p>
         <a href="#" onclick="window.open('/status.html?popup=1', 'status', 'width=80,height=80'); return false;" class="status-link">◉ Status</a>
+        <a href="#" onclick="document.getElementById('appHelpDialog').classList.add('open'); return false;" class="status-link">⊞ Als App öffnen</a>
+    </div>
+
+    <div id="appHelpDialog">
+        <div class="dialog-box">
+            <h3>Status-Fenster als App-Fenster einrichten</h3>
+            <ol>
+                <li>Rechtsklick auf den Desktop → <b>Neu → Verknüpfung</b></li>
+                <li>Als Ziel eintragen:<code>"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --app=https://reminder.heydtmann.eu/status.html</code></li>
+                <li>Name vergeben, z.B. <b>Reminder Status</b></li>
+                <li>Verknüpfung starten → Fenster in Taskleiste <b>anpinnen</b></li>
+            </ol>
+            <button class="close-btn" onclick="document.getElementById('appHelpDialog').classList.remove('open')">Schließen</button>
+        </div>
     </div>
 
     <script src="app.js"></script>

@@ -89,6 +89,20 @@
         const iconGreen = makeIcon('#22c55e');
         const iconOrange = makeIcon('#f97316');
         const iconRed = makeIcon('#dc2626');
+        const iconWhite = makeIcon('#ffffff');
+
+        let flashInterval = null;
+        function startFaviconFlash() {
+            if (flashInterval) return;
+            let tog = true;
+            flashInterval = setInterval(() => {
+                favicon.href = tog ? iconRed : iconWhite;
+                tog = !tog;
+            }, 500);
+        }
+        function stopFaviconFlash() {
+            if (flashInterval) { clearInterval(flashInterval); flashInterval = null; }
+        }
 
         async function check() {
             try {
@@ -111,9 +125,10 @@
                     currentItem = overdue[0];
                     info.textContent = currentItem.time;
                     document.title = currentItem.time;
-                    favicon.href = iconRed;
+                    startFaviconFlash();
                     if (lastStatus !== 'overdue') {
                         notify('⚠️ Überfällig', currentItem.medication + ' - ' + currentItem.time);
+                        if (document.hidden) window.focus();
                     }
                     lastStatus = 'overdue';
                 } else if (due.length) {
@@ -121,12 +136,14 @@
                     currentItem = due[0];
                     info.textContent = currentItem.time;
                     document.title = currentItem.time;
+                    stopFaviconFlash();
                     favicon.href = iconOrange;
                     if (lastStatus === 'ok') {
                         notify('🔔 Fällig', currentItem.medication + ' - ' + currentItem.time);
                     }
                     lastStatus = 'due';
                 } else {
+                    stopFaviconFlash();
                     lastStatus = 'ok';
                     currentItem = null;
                     const upcoming = d.upcoming || [];

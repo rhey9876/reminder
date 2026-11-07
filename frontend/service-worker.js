@@ -2,7 +2,7 @@
  * Reminder PWA - Service Worker
  */
 
-const CACHE_NAME = 'reminder-v7';
+const CACHE_NAME = 'reminder-v8';
 const VERSION_CACHE_KEY = 'app-version';
 const STATIC_ASSETS = [
     '/',
