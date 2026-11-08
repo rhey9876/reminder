@@ -127,7 +127,7 @@
                     document.title = currentItem.time;
                     startFaviconFlash();
                     if (lastStatus !== 'overdue') {
-                        notify('⚠️ Überfällig', currentItem.medication + ' - ' + currentItem.time);
+                        notify('⚠️ Überfällig', currentItem.time + ': ' + currentItem.medication);
                         if (document.hidden) window.focus();
                     }
                     lastStatus = 'overdue';
@@ -139,7 +139,7 @@
                     stopFaviconFlash();
                     favicon.href = iconOrange;
                     if (lastStatus === 'ok') {
-                        notify('🔔 Fällig', currentItem.medication + ' - ' + currentItem.time);
+                        notify('🔔 Fällig', currentItem.time + ': ' + currentItem.medication);
                     }
                     lastStatus = 'due';
                 } else {
@@ -168,7 +168,7 @@
                 await fetch('/api/snooze', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({medication: currentItem.medication, time: currentItem.time})
+                    body: JSON.stringify({medications: currentItem.medications || [currentItem.medication], time: currentItem.time})
                 });
                 check();
             }
@@ -179,7 +179,7 @@
                 await fetch('/api/confirm', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({medication: currentItem.medication, time: currentItem.time})
+                    body: JSON.stringify({medications: currentItem.medications || [currentItem.medication], time: currentItem.time})
                 });
                 check();
             }

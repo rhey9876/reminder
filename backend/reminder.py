@@ -404,6 +404,32 @@ def require_auth(f):
     return decorated
 
 
+def group_items(items):
+    """Fasst Eintraege mit gleicher Uhrzeit zu einem Reminder zusammen."""
+    groups = {}
+    for it in items:
+        g = groups.get(it['time'])
+        if g is None:
+            g = dict(it)
+            g['medications'] = []
+            groups[it['time']] = g
+        g['medications'].append(it['medication'])
+    for g in groups.values():
+        g['medication'] = ', '.join(g['medications'])  # Anzeige / Abwaertskompatibilitaet
+        g['count'] = len(g['medications'])
+    return sorted(groups.values(), key=lambda x: x['time'])
+
+
+def requested_medications(data):
+    """Liest 'medications' (Liste) oder 'medication' (einzeln) aus dem Request."""
+    meds = data.get('medications')
+    if meds is None:
+        meds = [data.get('medication')]
+    if not isinstance(meds, list) or not meds or len(meds) > 30:
+        return None
+    return meds
+
+
 def get_medication_status():
     """Calculate status for all medications."""
     config = load_config()
@@ -462,9 +488,9 @@ def get_medication_status():
                 upcoming.append(med_info)
 
     # Sort by time
-    overdue.sort(key=lambda x: x['time'])
-    due.sort(key=lambda x: x['time'])
-    upcoming.sort(key=lambda x: x['time'])
+    overdue = group_items(overdue)
+    due = group_items(due)
+    upcoming = group_items(upcoming)
 
     return {
         'overdue': overdue,
@@ -624,16 +650,19 @@ def snooze_medication():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
 
-        medication = data.get('medication')
+        meds = requested_medications(data)
         scheduled_time = data.get('time')
+        if meds is None:
+            return jsonify({'error': 'Invalid medication list'}), 400
+        for medication in meds:
+            valid, error = validate_medication_input(medication, scheduled_time)
+            if not valid:
+                return jsonify({'error': error}), 400
 
-        valid, error = validate_medication_input(medication, scheduled_time)
-        if not valid:
-            return jsonify({'error': error}), 400
-
-        # Set snooze for 5 minutes
+        # Set snooze for 5 minutes (alle Medikamente der Gruppe)
         snooze_until = datetime.now() + timedelta(minutes=5)
-        snooze_cache[(medication, scheduled_time)] = snooze_until
+        for medication in meds:
+            snooze_cache[(medication, scheduled_time)] = snooze_until
 
         return jsonify({
             'success': True,
@@ -653,32 +682,34 @@ def confirm_intake():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
 
-        medication = data.get('medication')
+        meds = requested_medications(data)
         scheduled_time = data.get('time')
+        if meds is None:
+            return jsonify({'error': 'Invalid medication list'}), 400
+        for medication in meds:
+            valid, error = validate_medication_input(medication, scheduled_time)
+            if not valid:
+                return jsonify({'error': error}), 400
 
-        valid, error = validate_medication_input(medication, scheduled_time)
-        if not valid:
-            return jsonify({'error': error}), 400
-
-        # Check if already taken today
-        if was_taken_today(medication, scheduled_time):
+        # Nur noch nicht erledigte Medikamente eintragen
+        todo = [m for m in meds if not was_taken_today(m, scheduled_time)]
+        if not todo:
             return jsonify({'error': 'Already taken today', 'duplicate': True}), 409
 
-        # Log the intake
         conn = get_db()
         actual_time = datetime.now().strftime('%H:%M:%S')
-
-        conn.execute('''
-            INSERT INTO intake_log (medication, scheduled_time, actual_time, status)
-            VALUES (?, ?, ?, 'taken')
-        ''', (medication, scheduled_time, actual_time))
-
+        for medication in todo:
+            conn.execute('''
+                INSERT INTO intake_log (medication, scheduled_time, actual_time, status)
+                VALUES (?, ?, ?, 'taken')
+            ''', (medication, scheduled_time, actual_time))
         conn.commit()
         conn.close()
 
         return jsonify({
             'success': True,
-            'medication': medication,
+            'medication': ', '.join(todo),
+            'medications': todo,
             'scheduled_time': scheduled_time,
             'actual_time': actual_time
         })

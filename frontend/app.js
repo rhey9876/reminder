@@ -247,7 +247,7 @@ function checkAndNotify(data) {
     }
 
     // Create key from current urgent items
-    const currentKey = urgent.map(m => `${m.medication}-${m.time}`).join('|');
+    const currentKey = urgent.map(m => `${m.medication}-${m.time}`).join('|');  // medication = alle Namen der Gruppe
 
     // Only notify if items changed (avoid spam)
     if (currentKey === lastNotifiedKey) {
@@ -260,8 +260,8 @@ function checkAndNotify(data) {
     const item = urgent[0];
     const title = '⏰ Erinnerung';
     const body = urgent.length > 1
-        ? `${item.medication} + ${urgent.length - 1} weitere`
-        : `${item.medication} - ${item.time}`;
+        ? `${item.time}: ${item.medication} (+ ${urgent.length - 1} weitere Termine)`
+        : `${item.time}: ${item.medication}`;
 
     showNotification(title, body);
 }
@@ -269,7 +269,7 @@ function checkAndNotify(data) {
 /**
  * Confirm medication intake
  */
-async function confirmIntake(medication, time, buttonElement) {
+async function confirmIntake(medications, time, buttonElement) {
     buttonElement.disabled = true;
     buttonElement.textContent = '...';
 
@@ -279,7 +279,7 @@ async function confirmIntake(medication, time, buttonElement) {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ medication, time })
+            body: JSON.stringify({ medications, time })
         });
 
         const data = await response.json();
@@ -309,7 +309,7 @@ async function confirmIntake(medication, time, buttonElement) {
 /**
  * Snooze medication for 5 minutes
  */
-async function snoozeIntake(medication, time, buttonElement) {
+async function snoozeIntake(medications, time, buttonElement) {
     buttonElement.disabled = true;
     buttonElement.textContent = '...';
 
@@ -319,7 +319,7 @@ async function snoozeIntake(medication, time, buttonElement) {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ medication, time })
+            body: JSON.stringify({ medications, time })
         });
 
         const data = await response.json();
@@ -434,22 +434,25 @@ function createMedicationCard(med, status) {
     }
 
     const showButton = status === 'overdue' || status === 'due';
-    const escapedMed = escapeHtml(med.medication);
+    const names = med.medications || [med.medication];
+    const escapedMed = names.map(n => `<div class="card-name">${escapeHtml(n)}</div>`).join('');
+    // Namen als JSON in data-Attribut (HTML-escaped), kein Inline-Quoting
+    const medsAttr = escapeHtml(JSON.stringify(names)).replace(/"/g, '&quot;');
     const escapedTime = escapeHtml(med.time);
 
     return `
         <div class="card">
             <div class="card-info">
-                <div class="card-name">${escapedMed}</div>
+                ${escapedMed}
                 <div class="card-time">🕐 ${escapedTime} ${timeInfo ? `• ${timeInfo}` : ''}</div>
                 <span class="card-status status-${status}">${statusLabels[status]}</span>
             </div>
             ${showButton ? `
                 <div class="card-buttons">
-                    <button class="btn-snooze" onclick="snoozeIntake('${escapedMed}', '${escapedTime}', this)">
+                    <button class="btn-snooze" data-meds="${medsAttr}" onclick="snoozeIntake(JSON.parse(this.dataset.meds), '${escapedTime}', this)">
                         ⏰ +5min
                     </button>
-                    <button class="btn-confirm" onclick="confirmIntake('${escapedMed}', '${escapedTime}', this)">
+                    <button class="btn-confirm" data-meds="${medsAttr}" onclick="confirmIntake(JSON.parse(this.dataset.meds), '${escapedTime}', this)">
                         ✓ Erledigt
                     </button>
                 </div>
