@@ -838,15 +838,25 @@ def nofood_windows(config, now):
     return result
 
 
+def intake_times(config, now):
+    """Alle heutigen Einnahmezeitpunkte (datetime) aller aktiven Medikamente, dedupliziert."""
+    today_str = now.strftime('%Y-%m-%d')
+    result = set()
+    for med in config.get('medications', []):
+        if not med.get('enabled', True) or not is_scheduled_today(med.get('days')):
+            continue
+        for time_str in med.get('times', []):
+            result.add(datetime.strptime(f"{today_str} {time_str}", '%Y-%m-%d %H:%M'))
+    return result
+
+
 def nofood_state(config, now):
-    """(in_window, flash_key) - flash_key gesetzt, wenn jetzt (auf die Minute) Einnahmezeit ist."""
-    in_window = False
+    """(in_window, flash_key) - flash_key gesetzt, wenn jetzt (auf die Minute) irgendein Einnahmezeitpunkt ist."""
+    in_window = any(start <= now < end for start, end, _s, _n in nofood_windows(config, now))
     flash_key = None
-    for start, end, sched, name in nofood_windows(config, now):
-        if start <= now < end:
-            in_window = True
-        if now.replace(second=0, microsecond=0) == sched:
-            flash_key = f"{now.strftime('%Y-%m-%d')} {name} {sched.strftime('%H:%M')}"
+    minute = now.replace(second=0, microsecond=0)
+    if minute in intake_times(config, now):
+        flash_key = f"{now.strftime('%Y-%m-%d')} {minute.strftime('%H:%M')}"
     return in_window, flash_key
 
 
@@ -883,8 +893,7 @@ def nofood_loop():
                         last_sent = in_window
                 if flash_key and flash_key not in flashed:
                     flashed.add(flash_key)
-                    if in_window:
-                        ha_send(url, 'red-flash')
+                    ha_send(url, 'red-flash')   # zu jedem Einnahmezeitpunkt, auch ausserhalb eines No-Food-Fensters
                 if len(flashed) > 50:
                     flashed.clear()
         except Exception:
